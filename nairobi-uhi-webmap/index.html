@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nairobi Urban Heat Island Explorer</title>
+<link rel="stylesheet" href="lib/leaflet.css">
+<style>
+  :root { --ink:#1b2430; --muted:#5b6675; --card:#ffffffee; --accent:#c2410c; }
+  * { box-sizing: border-box; }
+  html, body { height:100%; margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color:var(--ink); }
+  #map { position:absolute; inset:0; }
+  .panel { position:absolute; z-index:1000; background:var(--card); border-radius:10px; box-shadow:0 2px 14px #0003; padding:12px 14px; backdrop-filter: blur(4px); }
+  #info { top:12px; left:56px; max-width:320px; }
+  #info h1 { font-size:16px; margin:0 0 4px; }
+  #info p { font-size:12px; color:var(--muted); margin:0; line-height:1.4; }
+  #controls { top:12px; right:12px; width:230px; font-size:13px; }
+  #controls label { display:block; margin:4px 0; cursor:pointer; }
+  #controls h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:10px 0 4px; }
+  #controls h2:first-child { margin-top:0; }
+  #controls input[type=range] { width:100%; }
+  #legend { bottom:24px; left:12px; width:250px; font-size:12px; }
+  #legend .bar { height:12px; border-radius:6px; margin:6px 0 2px; }
+  #legend .ticks { display:flex; justify-content:space-between; color:var(--muted); }
+  #stats { bottom:24px; right:12px; font-size:12px; min-width:190px; }
+  #stats b { font-size:13px; }
+  #status { position:absolute; z-index:1100; top:50%; left:50%; transform:translate(-50%,-50%); background:#000b; color:#fff; padding:10px 16px; border-radius:8px; font-size:13px; }
+  .hidden { display:none; }
+  @media (max-width: 640px) {
+    #info { left:12px; right:12px; max-width:none; top:56px; }
+    #controls { top:auto; bottom:110px; right:12px; width:200px; }
+    #stats { display:none; }
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div class="panel" id="info">
+  <h1>Nairobi Urban Heat Island Explorer</h1>
+  <p>Land surface temperature, urban heat island intensity, thermal variance index and vegetation cover derived from Landsat 8 (Collection 2 Level 2), processed in Google Earth Engine. Click the map to read values.</p>
+</div>
+
+<div class="panel" id="controls">
+  <h2>Layer</h2>
+  <div id="layer-list"></div>
+  <h2>Opacity</h2>
+  <input type="range" id="opacity" min="0" max="1" step="0.05" value="0.8">
+  <h2>Basemap</h2>
+  <label><input type="radio" name="base" value="light" checked> Light</label>
+  <label><input type="radio" name="base" value="osm"> OpenStreetMap</label>
+  <label><input type="radio" name="base" value="sat"> Satellite</label>
+</div>
+
+<div class="panel" id="legend">
+  <b id="legend-title"></b>
+  <div class="bar" id="legend-bar"></div>
+  <div class="ticks"><span id="lg-min"></span><span id="lg-mid"></span><span id="lg-max"></span></div>
+</div>
+
+<div class="panel" id="stats">
+  <div id="stats-body">Click the map to read a value</div>
+</div>
+
+<div id="status">Loading rasters&hellip;</div>
+
+<script src="lib/leaflet.js"></script>
+<script src="lib/geotiff.js"></script>
+<script>
+// ---------------------------------------------------------------------------
+// CONFIG: edit the year, file names and display ranges to match your exports
+// ---------------------------------------------------------------------------
+const YEAR = '2022';
+const NODATA = -9999;            // value written by the GEE script for masked pixels
+
+const LAYERS = {
+  lst:   { label: 'Land Surface Temperature', file: `data/Nairobi_LST_${YEAR}.tif`, unit: '\u00B0C', digits: 1,
+           min: 18, max: 42,
+           stops: ['#313695','#4575b4','#74add1','#abd9e9','#ffffbf','#fee090','#fdae61','#f46d43','#d73027','#a50026'] },
+  uhi:   { label: 'Urban Heat Island (z-score)', file: `data/Nairobi_UHI_${YEAR}.tif`, unit: '\u03C3', digits: 2,
+           min: -3, max: 3,
+           stops: ['#2166ac','#67a9cf','#d1e5f0','#f7f7f7','#fddbc7','#ef8a62','#b2182b'] },
+  utfvi: { label: 'Thermal Field Variance Index (UTFVI)', file: `data/Nairobi_UTFVI_${YEAR}.tif`, unit: '', digits: 3,
+           min: -0.03, max: 0.03,
+           stops: ['#313695','#74add1','#fed976','#feb24c','#fd8d3c','#fc4e2a','#e31a1c','#b10026'] },
+  ndvi:  { label: 'NDVI (vegetation)', file: `data/Nairobi_NDVI_${YEAR}.tif`, unit: '', digits: 2,
+           min: -0.1, max: 0.8,
+           stops: ['#a6611a','#dfc27d','#f5f5f5','#a6d96a','#1a9641','#006837'] },
+  rgb:   { label: 'True colour (Landsat)', file: `data/Nairobi_TrueColor_${YEAR}.tif`, type: 'rgb', max: 0.3 },
+};
+
+const BASEMAPS = {
+  light: L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+         { attribution: '&copy; OpenStreetMap contributors &copy; CARTO', maxZoom: 19 }),
+  osm:   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+         { attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 }),
+  sat:   L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+         { attribution: 'Tiles &copy; Esri', maxZoom: 19 }),
+};
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+const hexToRgb = h => [1,3,5].map(i => parseInt(h.slice(i, i+2), 16));
+const isValid = v => v !== undefined && v !== null && Number.isFinite(v) && v > -9000;   // skips -9999 and NaN
+
+// 256-step colour lookup table built from the colour stops
+function buildLUT(cfg) {
+  const rgb = cfg.stops.map(hexToRgb), lut = [];
+  for (let n = 0; n < 256; n++) {
+    const x = (n / 255) * (rgb.length - 1), i = Math.min(Math.floor(x), rgb.length - 2), f = x - i;
+    lut.push(rgb[i].map((v, k) => Math.round(v + (rgb[i+1][k] - v) * f)));
+  }
+  return lut;
+}
+
+// Read a GeoTIFF into typed arrays + geographic bounds
+async function readRaster(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`${url} not found (HTTP ${resp.status})`);
+  const tiff = await GeoTIFF.fromArrayBuffer(await resp.arrayBuffer());
+  const image = await tiff.getImage();
+  const [west, south, east, north] = image.getBoundingBox();
+  const bands = await image.readRasters();                     // one typed array per band
+  return { w: image.getWidth(), h: image.getHeight(), west, south, east, north, bands };
+}
+
+// Paint the raster onto a canvas and return it as a PNG data URL
+function rasterToDataURL(r, cfg) {
+  const canvas = document.createElement('canvas');
+  canvas.width = r.w; canvas.height = r.h;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(r.w, r.h), d = img.data, n = r.w * r.h;
+
+  if (cfg.type === 'rgb') {
+    const [R, G, B] = r.bands;
+    for (let i = 0, j = 0; i < n; i++, j += 4) {
+      if (!isValid(R[i]) || !isValid(G[i]) || !isValid(B[i])) continue;      // alpha stays 0
+      const c = v => Math.round(255 * Math.pow(Math.min(1, Math.max(0, v / cfg.max)), 0.8));
+      d[j] = c(R[i]); d[j+1] = c(G[i]); d[j+2] = c(B[i]); d[j+3] = 255;
+    }
+  } else {
+    const lut = buildLUT(cfg), band = r.bands[0], span = cfg.max - cfg.min;
+    for (let i = 0, j = 0; i < n; i++, j += 4) {
+      const v = band[i];
+      if (!isValid(v)) continue;
+      const c = lut[Math.max(0, Math.min(255, Math.round(((v - cfg.min) / span) * 255)))];
+      d[j] = c[0]; d[j+1] = c[1]; d[j+2] = c[2]; d[j+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return canvas.toDataURL('image/png');
+}
+
+function valueAt(r, lat, lng) {
+  if (lng < r.west || lng > r.east || lat < r.south || lat > r.north) return null;
+  const col = Math.min(r.w - 1, Math.floor((lng - r.west) / (r.east - r.west) * r.w));
+  const row = Math.min(r.h - 1, Math.floor((r.north - lat) / (r.north - r.south) * r.h));
+  const v = r.bands[0][row * r.w + col];
+  return isValid(v) ? v : null;
+}
+
+function summarize(r) {
+  let min = Infinity, max = -Infinity, sum = 0, n = 0;
+  const band = r.bands[0];
+  for (let i = 0; i < band.length; i++) {
+    const v = band[i];
+    if (!isValid(v)) continue;
+    if (v < min) min = v; if (v > max) max = v; sum += v; n++;
+  }
+  return n ? { min, max, mean: sum / n } : null;
+}
+
+const statusEl = document.getElementById('status');
+const showStatus = msg => { statusEl.textContent = msg; statusEl.classList.remove('hidden'); };
+const hideStatus = () => statusEl.classList.add('hidden');
+
+// ---------------------------------------------------------------------------
+// Map setup
+// ---------------------------------------------------------------------------
+const map = L.map('map', { zoomControl: true }).setView([-1.2921, 36.8219], 11);
+let currentBase = BASEMAPS.light.addTo(map);
+L.control.scale({ imperial: false }).addTo(map);
+
+const state = { rasters: {}, overlays: {}, pending: {}, active: null, fitted: false, lastClick: '' };
+
+const listEl = document.getElementById('layer-list');
+Object.keys(LAYERS).forEach((key, i) => {
+  const lab = document.createElement('label');
+  lab.innerHTML = `<input type="radio" name="layer" value="${key}" ${i === 0 ? 'checked' : ''}> ${LAYERS[key].label}`;
+  listEl.appendChild(lab);
+});
+
+function setLegend(key) {
+  const cfg = LAYERS[key], panel = document.getElementById('legend');
+  if (cfg.type === 'rgb') { panel.classList.add('hidden'); return; }
+  panel.classList.remove('hidden');
+  document.getElementById('legend-title').textContent = cfg.label;
+  document.getElementById('legend-bar').style.background = `linear-gradient(to right, ${cfg.stops.join(',')})`;
+  const f = v => v.toFixed(cfg.digits);
+  document.getElementById('lg-min').textContent = f(cfg.min);
+  document.getElementById('lg-mid').textContent = f((cfg.min + cfg.max) / 2);
+  document.getElementById('lg-max').textContent = f(cfg.max);
+}
+
+function renderStats(key) {
+  const cfg = LAYERS[key], r = state.rasters[key];
+  let html = '';
+  if (r && cfg.type !== 'rgb') {
+    const s = summarize(r), f = v => v.toFixed(cfg.digits) + (cfg.unit ? ' ' + cfg.unit : '');
+    if (s) html += `<b>${cfg.label.split(' (')[0]}</b><br>Mean ${f(s.mean)}<br>Min ${f(s.min)} &middot; Max ${f(s.max)}<br>`;
+  }
+  html += state.lastClick || 'Click the map to read values';
+  document.getElementById('stats-body').innerHTML = html;
+}
+
+// Layers are fetched and painted on demand, so the page opens fast
+function ensureLayer(key) {
+  if (state.overlays[key]) return Promise.resolve(state.overlays[key]);
+  if (state.pending[key]) return state.pending[key];
+  const cfg = LAYERS[key];
+  state.pending[key] = readRaster(cfg.file).then(r => {
+    state.rasters[key] = r;
+    const url = rasterToDataURL(r, cfg);
+    state.overlays[key] = L.imageOverlay(url, [[r.south, r.west], [r.north, r.east]], { opacity: 0.8, interactive: false });
+    return state.overlays[key];
+  });
+  return state.pending[key];
+}
+
+async function showLayer(key) {
+  state.active = key;
+  showStatus(`Loading ${LAYERS[key].label}\u2026`);
+  try {
+    const overlay = await ensureLayer(key);
+    if (state.active !== key) return;                        // user switched while loading
+    Object.values(state.overlays).forEach(o => map.removeLayer(o));
+    overlay.addTo(map).setOpacity(parseFloat(document.getElementById('opacity').value));
+    setLegend(key);
+    renderStats(key);
+    if (!state.fitted) { map.fitBounds(overlay.getBounds()); state.fitted = true; }
+    hideStatus();
+  } catch (err) {
+    console.error(err);
+    delete state.pending[key];
+    showStatus(`Could not load ${LAYERS[key].file}: ${err.message}. ` +
+               `Check the file name in data/ and open the page through a web server, not file://`);
+  }
+}
+
+showLayer('lst');
+
+// ---------------------------------------------------------------------------
+// UI events
+// ---------------------------------------------------------------------------
+listEl.addEventListener('change', e => { if (e.target.name === 'layer') showLayer(e.target.value); });
+
+document.getElementById('opacity').addEventListener('input', e => {
+  const o = state.overlays[state.active]; if (o) o.setOpacity(parseFloat(e.target.value));
+});
+
+document.querySelectorAll('input[name=base]').forEach(r =>
+  r.addEventListener('change', e => {
+    map.removeLayer(currentBase);
+    currentBase = BASEMAPS[e.target.value].addTo(map);
+    currentBase.bringToBack();
+  }));
+
+map.on('click', e => {
+  const { lat, lng } = e.latlng;
+  const rows = Object.keys(LAYERS)
+    .filter(k => state.rasters[k] && LAYERS[k].type !== 'rgb')      // layers already loaded
+    .map(k => {
+      const cfg = LAYERS[k], v = valueAt(state.rasters[k], lat, lng);
+      return `${cfg.label.split(' (')[0]}: <b>${v === null ? 'no data' : v.toFixed(cfg.digits) + (cfg.unit ? ' ' + cfg.unit : '')}</b>`;
+    });
+  const html = (rows.length ? rows.join('<br>') + '<br>' : '') +
+    `<span style="color:#5b6675">${lat.toFixed(4)}, ${lng.toFixed(4)}</span>`;
+  state.lastClick = '<hr style="border:0;border-top:1px solid #0002;margin:6px 0">' + html;
+  renderStats(state.active);
+  L.popup().setLatLng(e.latlng).setContent(html).openOn(map);
+});
+</script>
+</body>
+</html>
