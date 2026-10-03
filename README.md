@@ -2,7 +2,7 @@
 
 An interactive web map showing land surface temperature (LST), urban heat island (UHI) intensity, thermal variance and vegetation cover across Nairobi, Kenya. The analysis is done in Google Earth Engine from Landsat 8 imagery and published as a static Leaflet web map.
 
-**Live demo:** https://lewis-mugambi.github.io/nairobi-uhi-explorer/
+**Live demo:**//https://lewis-mugambi.github.io/nairobi-uhi-explorer-/
 
 ## Why this project
 
