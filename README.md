@@ -110,7 +110,7 @@ Google Earth Engine (JavaScript API), Landsat 8, Leaflet, geotiff.js, HTML/CSS/J
 
 ## Author
 
-**YOUR NAME**
+**LEWIS MUGAMBI**
 Geoinformation Technology, Technical University of Kenya
 [LinkedIn](https://www.linkedin.com/in/lewis-mugambi-5625b0299) · [GitHub](https://github.com/lewis-mugambi)
 
